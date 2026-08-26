@@ -18,6 +18,12 @@
 
         You should have received a copy of the GNU Affero General Public License
         along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+        Wimlib-imagex.exe is licensed under the GNU General Public License version
+        3 or any later version. That is, for Windows builds. This program just calls
+        a compiled exe AS A SEPARATE PROCESS even though the code of wimlib-imagex can
+        be combined. Aarav Katariya chose not to combine them to avoid a combined work
+        which will have to be Affero GPL licensed (because AGPL is stricter than GPL).
 .PARAMETER Op
     This is a mandatory parameter.
     Specifies the operation to perform on the image file. Valid values:
@@ -215,6 +221,10 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 # Create an Affero GPL notice.
 $AGPLNotice = @'
+===========================================================================
+              Welcome To ALOS Image Tools By Aarav Katariya!
+===========================================================================
+
 Copyright (C) 2023-2026 Aarav Katariya
 
 This program is free software: you can redistribute it and/or modify
@@ -229,9 +239,15 @@ GNU Affero General Public License for more details.
 
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+Wimlib-imagex.exe is licensed under the GNU General Public License version
+3 or any later version. That is, for Windows builds. This program just calls
+a compiled exe AS A SEPARATE PROCESS even though the code of wimlib-imagex can
+be combined. Aarav Katariya chose not to combine them to avoid a combined work
+which will have to be Affero GPL licensed (because AGPL is stricter than GPL).
 '@
 # And then print it as well as a five second delay.
-Write-Host $AGPLNotice -ForegroundColor Red
+Write-Host $AGPLNotice -ForegroundColor Red # Ask me why I use 2023-20XX instead of just 20XX?
 Start-Sleep -Seconds 5
 # Add assemblies and types for GUI.
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
@@ -1099,6 +1115,8 @@ function Process-Container {
         [string]$Mode
     )
     $target = "of"
+    # Overwrite $Activity because it is not neccessary to show the operation.
+    $Activity = "Task progress"
     # Uncomment this to hide integrity table calculation progress.
     # However, it will significantly slow down your operation especially
     # in Capture and Export mode. Not that much for Split and Apply.
@@ -3301,5 +3319,5 @@ Show-Finished
     Run either setup_wf.exe or setup_wpf.exe in the same folder or just
     execute this script without any arguments to launch setup.
     Made by Aarav Katariya with love and care...
-    Line count: 3305
+    Line count: 3323
 #>
