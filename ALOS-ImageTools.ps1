@@ -45,6 +45,8 @@
         DeleteImage - Delete one or more image indices from a WIM file.
         JoinWIM - Join a split wimfile and it's parts to a standard WIM file.
         JoinESD - Join a split wimfile and it's parts to a standard WIM file and then convert it to a far smaller ESD file.
+        ChangeBootIndexWIM - Read a wim file and change it's boot index without something like GimageX.
+                             Eg, change a wimfile's boot index from 1 to 2.
 .PARAMETER Path
     This is a mandatory parameter.
     This is capable of specifying the source file or directory.
@@ -141,6 +143,10 @@
 .EXAMPLE
     .\ALOS-ImageTools.ps1 -Op JoinESD -Path C:\MySplitWims\data.swm
     Join a split wimfile and it's parts to a standard WIM file and then convert it to a far smaller ESD file.
+.EXAMPLE
+    .\ALOS-ImageTools.ps1 -Op ChangeBootIndexWIM -Path C:\boot.wim
+    Read a wim file and change it's boot index without something like GimageX.
+    Eg, change a wimfile's boot index from 1 to 2.
 .NOTES
     Author: Aarav Katariya
     Version: 1.0
@@ -165,7 +171,7 @@
         - Please do not change the priority of wimlib-imagex.exe to High or Realtime, it actually froze my system for minutes. :(
         - ApplyAndDeleteImage cannot be used on ESD or SWM files because they are read-only.
         - The program has a way to detect your Windows theme. If light, use light theme. If dark, use dark theme.
-        - A 25th operation exists but it does not launch ALOS Image Tools at all. It will launch dism.exe /cleanup-wim with administrator privileges.
+        - A 26th operation exists but it does not launch ALOS Image Tools at all. It will launch dism.exe /cleanup-wim with administrator privileges.
         Official ESD downloads (limited) - https://worproject.com/esd
         Official ESD downloads (complete) - https://files.rg-adguard.net/version/83fb91c9-107c-bdda-1ffc-2952d753a472?dark=1
         The program requires Windows PowerShell 5.1 not PowerShell Core 6 or 7 and must run with administrator privileges for all operations. If you do not, I will relaunch as admin.
@@ -176,15 +182,14 @@
 [CmdletBinding()]
 param(
     [Parameter(HelpMessage="What operation do you want to do?")]
-    [ValidateSet('Capture','Append','Mount','ExportWIM','ExportESD','RecompressWIM','RecompressESD','ConvertToWIM','ConvertToESD','GetInfo','Apply','SplitWIM','DeleteImage','ApplyAndDeleteImage','CreateISOWIM','CreateISOESD','ExtractWIM','ExtractESD','ExtractSWM','SaveWIM','SaveESD','SaveSWM','JoinWIM','JoinESD','SetupProgram')]
+    [ValidateSet('Capture','Append','Mount','ExportWIM','ExportESD','RecompressWIM','RecompressESD','ConvertToWIM','ConvertToESD','GetInfo','Apply','SplitWIM','DeleteImage','ApplyAndDeleteImage','CreateISOWIM','CreateISOESD','ExtractWIM','ExtractESD','ExtractSWM','SaveWIM','SaveESD','SaveSWM','JoinWIM','JoinESD','ChangeBootIndexWIM','SetupProgram')]
     [string]$Op = 'SetupProgram',
     [Parameter(HelpMessage="Where is your image file or directory?")]
     [string]$Path = 'SetupProgram',
     [switch]$InstallingWindows,
     [Parameter(HelpMessage="Do you want to use the modern GUI? True or False value.")]
     [switch]$WPFUI,
-    [switch]$NoHashes,
-    [switch]$CheckIntegrity
+    [switch]$NoHashes
 )
 # Adjust execution policy if script execution policy is not 'Bypass'.
 if ((Get-ExecutionPolicy) -cne "Bypass") { Set-ExecutionPolicy Bypass -Scope Process -Force }
@@ -192,6 +197,7 @@ Import-Module DISM -Force
 # Define the working directory. It will determine all the sub-locations.
 $WorkingDir = $PSScriptRoot
 # Show the operation to the user.
+Clear-Host
 Write-Host "Operation chosen: ${Op}`r`nFile or folder path selected: ${Path}.`r`n" # I hate LF line endings. I love CRLF endings.
 # Set a helpful message if you choose a resource-intensive operation.
 $CompressWarn = "This will use all your system resources. It can take up to several hours depending on your system. Your cpu will remain at 100% usage."
@@ -224,9 +230,9 @@ GNU Affero General Public License for more details.
 You should have received a copy of the GNU Affero General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 '@
-# And then print it as well as a 3 second delay.
+# And then print it as well as a five second delay.
 Write-Host $AGPLNotice -ForegroundColor Red
-Start-Sleep -Seconds 3
+Start-Sleep -Seconds 5
 # Add assemblies and types for GUI.
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 if ($WPFUI) {
@@ -241,6 +247,64 @@ if ($WPFUI) {
 }
 # Enable visual styles for Windows Forms.
 [System.Windows.Forms.Application]::EnableVisualStyles()
+# Add the type for WIMGAPI use.
+if (-not ('ALOSImageTools.NativeWimg' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+// Create new namespace.
+namespace ALOSImageTools
+{
+    public static class NativeWimg
+    {
+        public const uint WIM_GENERIC_READ  = 0x80000000;
+        public const uint WIM_GENERIC_WRITE = 0x40000000;
+        public const uint WIM_OPEN_EXISTING = 3;
+        public const uint WIM_COMPRESS_NONE = 0;
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct WIM_INFO
+        {
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+            public string WimPath;
+            public Guid Guid;
+            public uint ImageCount;
+            public uint CompressionType;
+            public ushort PartNumber;
+            public ushort TotalParts;
+            public uint BootIndex;
+            public uint WimAttributes;
+            public uint WimFlagsAndAttr;
+        }
+        // Import WIMGAPI dll.
+        [DllImport("wimgapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        public static extern IntPtr WIMCreateFile(
+            string pszWimPath,
+            uint dwDesiredAccess,
+            uint dwCreationDisposition,
+            uint dwFlagsAndAttributes,
+            uint dwCompressionType,
+            out uint pdwCreationResult);
+        [DllImport("wimgapi.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WIMSetBootImage(
+            IntPtr hWim,
+            uint dwImageIndex);
+        [DllImport("wimgapi.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WIMGetAttributes(
+            IntPtr hWim,
+            out WIM_INFO pWimInfo,
+            uint cbWimInfo);
+        [DllImport("wimgapi.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        public static extern bool WIMCloseHandle(
+            IntPtr hObject);
+    }
+}
+// This will allow access to some functions.
+// Made by Aarav Katariya with love and care.
+'@
+}
 function Question {
     param(
         [Parameter(Mandatory)]
@@ -282,29 +346,13 @@ function Question {
 # Function to show error message and exit.
 function Error($msg) {
     $Host.UI.RawUI.WindowTitle = "$Op Failed On $Path" # Set the Window Title to say failed.
-    if ($WPFUI) {
-        [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null
-    }
+    if ($WPFUI) { [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Error) | Out-Null } else { [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error) | Out-Null }
     exit 1
 }
 # Function to show warning message.
-function Warn($msg) {
-    if ($WPFUI) {
-        [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null
-    }
-}
+function Warn($msg) { if ($WPFUI) { [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Warning) | Out-Null } else { [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning) | Out-Null } }
 # Function to show information message.
-function Info($msg) {
-    if ($WPFUI) {
-        [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null
-    } else {
-        [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null
-    }
-}
+function Info($msg) { if ($WPFUI) { [System.Windows.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.MessageBoxButton]::OK, [System.Windows.MessageBoxImage]::Information) | Out-Null } else { [System.Windows.Forms.MessageBox]::Show($msg, 'ALOS Image Tools', [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information) | Out-Null } }
 # Function to set-progress. It depends on the Write-Progress cmdlet!
 function Set-Progress {
     param(
@@ -588,9 +636,8 @@ function Pick-Index {
                 Name  = ''
             }
             $entries += $current
-        } elseif ($current -and $line -match '^\s*Name\s*:\s*(.+)') {
-            $current.Name = $matches[1].Trim()
         }
+        elseif ($current -and $line -match '^\s*Name\s*:\s*(.+)') { $current.Name = $matches[1].Trim() }
     }
     if (-not $entries) { Error "No images found in:`n$Path" }
     if (-not $MultipleImages -and $entries.Count -eq 1) { return [int]$entries[0].Index }
@@ -604,22 +651,23 @@ function Pick-Index {
     $form.FormBorderStyle = 'FixedDialog'
     $form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::Dpi
     $form.Padding = '8,8,8,8'
-    $form.Font = New-Object System.Drawing.Font("Segoe UI",9)
+    $form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
     $ThemeControl = Is-LightModeOn
     if ($ThemeControl.Apps -or $ThemeControl.System) { Enable-DarkMode $form }
     $lbl = New-Object Windows.Forms.Label
-    $lbl.Text = if ($MultipleImages) { "Select one or more image indices using Ctrl+Click." } else { "Select an image index" }
+    $lbl.Text = if ($MultipleImages) { "Select one or more image indices using Ctrl+Click." }
+    else { "Select an image index" }
     $lbl.AutoSize = $true
     $lbl.Dock = 'Bottom'
     $lbl.Padding = '4,4,4,6'
-    $lbl.Font = New-Object System.Drawing.Font("Segoe UI",9.5,[System.Drawing.FontStyle]::Bold)
+    $lbl.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
     $lbl.ForeColor = $form.ForeColor
     $lbl.BackColor = 'Transparent'
     $list = New-Object Windows.Forms.ListBox
     $list.Dock = 'Fill'
     $list.IntegralHeight = $false
     $list.SelectionMode = if ($MultipleImages) { [System.Windows.Forms.SelectionMode]::MultiExtended } else { [System.Windows.Forms.SelectionMode]::One }
-    $list.Font = New-Object System.Drawing.Font("Segoe UI",9)
+    $list.Font = New-Object System.Drawing.Font("Segoe UI", 9)
     foreach ($img in $entries) {
         $label = "Index $($img.Index)"
         if ($img.Name) { $label += " --- $($img.Name)" }
@@ -630,17 +678,20 @@ function Pick-Index {
     $panel.Height = 46
     $panel.Padding = '6,6,6,6'
     $panel.BackColor = $form.BackColor
+    $IsExportOperation = $Op -in @('ExportWIM', 'ExportESD')
+    if ($IsExportOperation) {
+        $ExportAll = New-Object Windows.Forms.Button
+        $ExportAll.Text = 'Export All'
+        $ExportAll.Width = 100
+        $ExportAll.Height = 28
+        $ExportAll.Anchor = 'Right,Bottom'
+    }
     $ok = New-Object Windows.Forms.Button
     $ok.Text = 'Proceed'
     $ok.Width = 90
     $ok.Height = 28
     $ok.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $ok.Anchor = 'Right,Bottom'
-    $ExportAll = New-Object Windows.Forms.Button
-    $ExportAll.Text = 'Export All'
-    $ExportAll.Width = 100
-    $ExportAll.Height = 28
-    $ExportAll.Anchor = 'Right,Bottom'
     $cancel = New-Object Windows.Forms.Button
     $cancel.Text = 'Abort'
     $cancel.Width = 90
@@ -648,7 +699,7 @@ function Pick-Index {
     $cancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     $cancel.Anchor = 'Right,Bottom'
     $panel.Controls.Add($cancel)
-    $panel.Controls.Add($ExportAll)
+    if ($IsExportOperation) { $panel.Controls.Add($ExportAll) }
     $panel.Controls.Add($ok)
     $form.AcceptButton = $ok
     $form.CancelButton = $cancel
@@ -657,24 +708,32 @@ function Pick-Index {
         Enable-DarkMode $panel
         Enable-DarkMode $list
         Enable-DarkMode $ok
-        Enable-DarkMode $ExportAll
         Enable-DarkMode $cancel
         Enable-DarkMode $lbl
+        if ($IsExportOperation) { Enable-DarkMode $ExportAll }
     }
-    $ExportAllChosen = $false
-    $ExportAll.Add_Click({
-        $script:ExportAllChosen = $true
-        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
-        $form.Close()
-    })
+    if ($IsExportOperation) {
+        $script:ExportAllChosen = $false
+        $ExportAll.Add_Click({
+            $script:ExportAllChosen = $true
+            $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $form.Close()
+        })
+    }
+    else { $script:ExportAllChosen = $false }
     $panel.Add_Resize({
         param($s, $e)
         $p = $s
         $spacing = 8
         $cancel.Left = $p.ClientSize.Width - $cancel.Width - 6
-        $ExportAll.Left = $cancel.Left - $ExportAll.Width - $spacing
-        $ok.Left = $ExportAll.Left - $ok.Width - $spacing
-        $ok.Top = $ExportAll.Top = $cancel.Top = 8
+        $cancel.Top = 8
+        if ($IsExportOperation) {
+            $ExportAll.Left = $cancel.Left - $ExportAll.Width - $spacing
+            $ExportAll.Top = 8
+            $ok.Left = $ExportAll.Left - $ok.Width - $spacing
+        }
+        else { $ok.Left = $cancel.Left - $ok.Width - $spacing }
+        $ok.Top = 8
     })
     $list.Add_DoubleClick({
         if ($list.SelectedIndex -ge 0) {
@@ -689,18 +748,24 @@ function Pick-Index {
     $panel.Refresh()
     $spacing = 8
     $cancel.Left = $panel.ClientSize.Width - $cancel.Width - 6
-    $ExportAll.Left = $cancel.Left - $ExportAll.Width - $spacing
-    $ok.Left = $ExportAll.Left - $ok.Width - $spacing
-    $ok.Top = $ExportAll.Top = $cancel.Top = 8
+    $cancel.Top = 8
+    if ($IsExportOperation) {
+        $ExportAll.Left = $cancel.Left - $ExportAll.Width - $spacing
+        $ExportAll.Top = 8
+        $ok.Left = $ExportAll.Left - $ok.Width - $spacing
+    }
+    else { $ok.Left = $cancel.Left - $ok.Width - $spacing }
+    $ok.Top = 8
     $res = $form.ShowDialog()
     if ($res -ne [System.Windows.Forms.DialogResult]::OK) { Error "No index selected." }
-    if ($script:ExportAllChosen) { return @($entries | ForEach-Object { [int]$_.Index }) }
+    if ($IsExportOperation -and $script:ExportAllChosen) { return @($entries | ForEach-Object { [int]$_.Index }) }
     if ($MultipleImages) {
         $sel = @()
         foreach ($i in $list.SelectedIndices) { $sel += $entries[$i].Index }
         if (-not $sel) { Error "No index selected." }
         return ,$sel
-    } else {
+    }
+    else {
         if ($list.SelectedIndex -lt 0) { Error "No index selected." }
         return [int]$entries[$list.SelectedIndex].Index
     }
@@ -1023,18 +1088,21 @@ function Extract-ISO {
 function Process-Container {
     [CmdletBinding()]
     param(
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory)]
         [string]$ExePath = $wimlib,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory)]
         [string[]]$Arguments,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory)]
         [string]$Activity,
-        [Parameter(Mandatory=$true)]
+        [Parameter(Mandatory)]
         [ValidateSet('Capture And Export','Apply','Split')]
         [string]$Mode
     )
     $target = "of"
-    if ($CheckIntegrity) { $Arguments += '--check' } # Add the check integrity flag if the user asked for it.
+    # Uncomment this to hide integrity table calculation progress.
+    # However, it will significantly slow down your operation especially
+    # in Capture and Export mode. Not that much for Split and Apply.
+    # $Arguments += '--check'
     if ($Mode -eq "Capture And Export") {
         $progress = @(
             [regex]'^(?<stage>Archiving file data):\s+(?<done>\d+(?:\.\d+)?)\s+(?<unit>[KMGTPEZY]?i?B) of (?<total>\d+(?:\.\d+)?)\s+\k<unit> \((?<pct>\d+(?:\.\d+)?)%\) done$'
@@ -1054,6 +1122,7 @@ function Process-Container {
                     $total = $match.Groups['total'].Value
                     $unit = $match.Groups['unit'].Value
                     $stage = $match.Groups['stage'].Value
+                    # Some readings may not be accurate! Double check by running the command yourself to verfiy!
                     Set-Progress $Activity "${stage}: $done $unit $target $total $unit (${pct}%)" $pct 2
                     break
                 }
@@ -1081,6 +1150,7 @@ function Process-Container {
                     $total = $match.Groups['total'].Value
                     $unit = $match.Groups['unit'].Value
                     $stage = $match.Groups['stage'].Value
+                    # Some readings may not be accurate! Double check by running the command yourself to verfiy!
                     Set-Progress $Activity "${stage}: $done $unit $target $total $unit (${pct}%)" $pct 2
                     break
                 }
@@ -1106,6 +1176,7 @@ function Process-Container {
                         $part = $match.Groups['part'].Value
                         $parts = $match.Groups['parts'].Value
                         $stage = $match.Groups['stage'].Value
+                        # Some readings may not be accurate! Double check by running the command yourself to verfiy!
                         Set-Progress $Activity "${stage}: $done $unit $target $total $unit (Part $part $target $parts ${pct}%)" $pct 2
                         break
                     }
@@ -1156,6 +1227,66 @@ function Remove-TemporaryWIM {
     )
     if ([string]::IsNullOrWhiteSpace($Path)) { return }
     if (Test-Path -LiteralPath $Path) { Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue }
+}
+# Function to acquire the wim information.
+function Acquire-WimInformation {
+    param(
+        [Parameter(Mandatory)]
+        [string]$WimPath
+    )
+    [uint32]$creationResult = 0
+    $WIMGAPI = [ALOSImageTools.NativeWimg]::WIMCreateFile($WimPath, [ALOSImageTools.NativeWimg]::WIM_GENERIC_READ, [ALOSImageTools.NativeWimg]::WIM_OPEN_EXISTING, 0, [ALOSImageTools.NativeWimg]::WIM_COMPRESS_NONE, [ref]$creationResult)
+    if ($WIMGAPI -eq [IntPtr]::Zero -or $WIMGAPI -eq [IntPtr](-1)) {
+        $Err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Error "Sorry! We were unable to open the wimfile for reading!`r`n`r`nThe error is: ${Err}."
+    }
+    try {
+        [ALOSImageTools.NativeWimg+WIM_INFO]$info = New-Object ALOSImageTools.NativeWimg+WIM_INFO
+        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][ALOSImageTools.NativeWimg+WIM_INFO])
+        if (-not [ALOSImageTools.NativeWimg]::WIMGetAttributes($WIMGAPI, [ref]$info, $size)) {
+            $Err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Error "Sorry! We were unable to read the WIM attributes.`r`n`r`nThe error is: ${Err}."
+        }
+        return $info
+    }
+    finally { [ALOSImageTools.NativeWimg]::WIMCloseHandle($WIMGAPI) | Out-Null }
+}
+# Function to set the boot image of a wimfile.
+function Set-WimBootIndex {
+    param(
+        [Parameter(Mandatory)]
+        [string]$WimPath,
+        [Parameter(Mandatory)]
+        [uint32]$Index
+    )
+    [uint32]$creationResult = 0
+    $WIMGAPI = [ALOSImageTools.NativeWimg]::WIMCreateFile(
+        $WimPath,
+        [ALOSImageTools.NativeWimg]::WIM_GENERIC_READ -bor [ALOSImageTools.NativeWimg]::WIM_GENERIC_WRITE,
+        [ALOSImageTools.NativeWimg]::WIM_OPEN_EXISTING,
+        0,
+        [ALOSImageTools.NativeWimg]::WIM_COMPRESS_NONE,
+        [ref]$creationResult
+    )
+    if ($WIMGAPI -eq [IntPtr]::Zero -or $WIMGAPI -eq [IntPtr](-1)) {
+        $Err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        Error "Sorry! We were unable to open the wimfile for reading!`r`n`r`nThe error is: ${Err}."
+    }
+    try {
+        if (-not [ALOSImageTools.NativeWimg]::WIMSetBootImage($WIMGAPI, $Index)) {
+            $Err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Error "Sorry! The boot index was unable to change. No changes have been made.`r`n`r`nThe error is: ${Err}."
+        }
+        [ALOSImageTools.NativeWimg+WIM_INFO]$Verification = New-Object ALOSImageTools.NativeWimg+WIM_INFO
+        $size = [uint32][Runtime.InteropServices.Marshal]::SizeOf([type][ALOSImageTools.NativeWimg+WIM_INFO])
+        if (-not [ALOSImageTools.NativeWimg]::WIMGetAttributes($WIMGAPI, [ref]$Verification, $size)) {
+            $Err = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Error "Sorry! The boota index changed successfully but we failed to verfiy that it actually changed.`r`n`r`nThe error is: ${Err}."
+        }
+        if ($Verification.BootIndex -ne $Index) { Error "Boot index verification failed.`r`n`r`nRequested index: $Index`r`nActual WIM BootIndex: $($Verification.BootIndex)" }
+        return $Verification
+    }
+    finally { [ALOSImageTools.NativeWimg]::WIMCloseHandle($WIMGAPI) | Out-Null }
 }
 Clear-Host # Because we have finished defining functions.
 # WPF dark mode. (Does not really work.)
@@ -2119,6 +2250,33 @@ switch ($Op) {
         }
         if ($Success) { Info "Success! $SplitWIM has been exported to $Dest." }
     }
+    'ChangeBootIndexWIM' {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { Error "Did you know that the file does not exist?:`r`n$Path" }
+        if ([IO.Path]::GetExtension($Path) -ine '.wim') { Error "You can only use WIM files, not ESD or SWM.`r`n`r`nSelected: $Path" }
+        Set-Progress $Op "Acquiring the WIM info..." 20
+        $WimInfo = Acquire-WimInformation -WimPath $Path
+        if ([uint32]$WimInfo.ImageCount -lt 1) { Error "NO IMAGES! Cannot select a boot image." }
+        $CurrentBootIndex = [uint32]$WimInfo.BootIndex
+        Write-Host "The current bootable image is ${CurrentBootIndex}."
+        Write-Host "You have $($WimInfo.ImageCount) images in:`r`n$Path"
+        Set-Progress $Op "Select the new bootable image index..." 50
+        $NewBootIndex = [uint32](Pick-Index -Path $Path)
+        if ($NewBootIndex -lt 1 -or $NewBootIndex -gt [uint32]$WimInfo.ImageCount) { Error "$NewBootIndex does not exist. It shall be in the range of (1-$($WimInfo.ImageCount))." }
+        if ($NewBootIndex -eq $CurrentBootIndex) {
+            Complete-Progress $Op
+            Error "$NewBootIndex is already the bootable image that boots when you boot from this file!"
+        }
+        if ((Question "Are you sure you want to change the boot image?`r`n`r`nCurrent: ${CurrentBootIndex}`r`nNew: ${NewBootIndex}`r`n`r`nThis action can be undone afterwards." -Buttons ([System.Windows.Forms.MessageBoxButtons]::YesNo) -Icon ([System.Windows.Forms.MessageBoxIcon]::Question)) -ne [System.Windows.Forms.DialogResult]::Yes) {
+            Complete-Progress $Op
+            Error "You aborted. Nothing has ever happened. Sssshhhh..."
+        }
+        Set-Progress $Op "The bootable image will change from ${CurrentBootIndex} to ${NewBootIndex}..." 75
+        $Verification = Set-WimBootIndex -WimPath $Path -Index $NewBootIndex
+        Set-Progress $Op "Let me make sure it happened..." 95
+        if ([uint32]$Verification.BootIndex -ne $NewBootIndex) { Error "The verification has failed!`r`n`r`nYou wanted ${NewBootIndex}`r`nReality: $($Verification.BootIndex)" }
+        Complete-Progress $Op
+        Info "Success! The WIM boot index has been changed from ${CurrentBootIndex} to ${NewBootIndex}.`r`n`r`nYour wimfile: $Path"
+    }
     'SetupProgram' {
         if ($Op -ceq "SetupProgram" -and $Path -cne "SetupProgram") { Error "The path also needs to be SetupProgram." }
         $PSExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\PowerShell.exe"
@@ -2191,8 +2349,7 @@ Windows Registry Editor Version 5.00
             Write-Host "Installing ALOS Image Tools to ${Root}!!!" -ForegroundColor Yellow
             $ALOSImageToolsDir = $Root -replace '\\', '\\' # Use a regex to find \ and replace with \\ to escape \ in registry file.
             $ALOSImageTools = "$ALOSImageToolsDir\\ALOS-ImageTools.ps1" # Manually add 2 \ to compensate for the file path in the registry.
-            $CI = Read-Host "Do you want to enable integrity check as well?"
-            $Registry_NoCI = @"
+            $Registry = @"
 Windows Registry Editor Version 5.00
 
 ; ================================================
@@ -2316,6 +2473,13 @@ Windows Registry Editor Version 5.00
 
 [HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\14ApplyAndDeleteImage\command]
 @="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ApplyAndDeleteImage -Path \"%1\""
+
+[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\26ChangeBootIndexWIM]
+@="Change Bootable Image"
+"HasLUAShield"=""
+
+[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\26ChangeBootIndexWIM\command]
+@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ChangeBootIndexWIM -Path \"%1\""
 
 ; ================================================
 ; ESD file submenu.
@@ -2684,509 +2848,8 @@ Windows Registry Editor Version 5.00
 ; END OF CONTEXT MENU REGISTRY.
 ; ==========================================
 "@
-            $Registry_CI = @"
-Windows Registry Editor Version 5.00
-
-; ================================================
-; ALOS Image Tools Context Menu Entries
-; ================================================
-
-; Enable classic context menu.
-[HKEY_CURRENT_USER\Software\Classes\CLSID\{86ca1aa0-34aa-4e8b-a509-50c905bae2a2}\InprocServer32]
-@=""
-
-; ================================================
-; WIM file submenu.
-; ================================================
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-"AppliesTo"="System.FileExtension:\"wim\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\03Mount]
-@="Mount Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\03Mount\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Mount -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export]
-"MUIVerb"="Export Images..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export\shell\04ExportWIM]
-@="To WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export\shell\04ExportWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExportWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export\shell\05ExportESD]
-@="To ESD"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\04Export\shell\05ExportESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExportESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\06RecompressWIM]
-@="Recompress"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\06RecompressWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op RecompressWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\09ConvertToESD]
-@="Convert To ESD"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\09ConvertToESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ConvertToESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo]
-"MUIVerb"="Get Info..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo\shell\10AGetInfo]
-@="With Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo\shell\10AGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo\shell\10BGetInfo]
-@="Without Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\10GetInfo\shell\10BGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -NoHashes -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\11AApply]
-@="Apply Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\11AApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\11BApply]
-@="Install Windows"
-"HasLUAShield"=""
-"AppliesTo"="System.FileName:\"install.wim\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\11BApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -InstallingWindows -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\12SplitWIM]
-@="Split WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\12SplitWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op SplitWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\13DeleteImage]
-@="Delete Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\13DeleteImage\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op DeleteImage -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\14ApplyAndDeleteImage]
-@="Apply And Delete Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_WIM\shell\14ApplyAndDeleteImage\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ApplyAndDeleteImage -Path \"%1\" -CheckIntegrity"
-
-; ================================================
-; ESD file submenu.
-; ================================================
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-"AppliesTo"="System.FileExtension:\"esd\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export]
-"MUIVerb"="Export Images..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export\shell\04ExportWIM]
-@="To WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export\shell\04ExportWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExportWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export\shell\05ExportESD]
-@="To ESD"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\04Export\shell\05ExportESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExportESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\07RecompressESD]
-@="Recompress"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\07RecompressESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op RecompressESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\08ConvertToWIM]
-@="Convert To WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\08ConvertToWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ConvertToWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo]
-"MUIVerb"="Get Info..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo\shell\10AGetInfo]
-@="With Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo\shell\10AGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo\shell\10BGetInfo]
-@="Without Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\10GetInfo\shell\10BGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -NoHashes -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\11AApply]
-@="Apply Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\11AApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\11BApply]
-@="Install Windows"
-"HasLUAShield"=""
-"AppliesTo"="System.FileName:\"install.esd\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\11BApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -InstallingWindows -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO]
-"MUIVerb"="Create ISO..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO\shell\15CreateISOWIM]
-@="With install.wim As Installation Source"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO\shell\15CreateISOWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op CreateISOWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO\shell\16CreateISOESD]
-@="With install.esd As Installation Source"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ESD\shell\15CreateISO\shell\16CreateISOESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op CreateISOESD -Path \"%1\" -CheckIntegrity"
-
-; ================================================
-; SWM file submenu.
-; ================================================
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-"AppliesTo"="System.FileExtension:\"swm\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo]
-"MUIVerb"="Get Info..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo\shell\10AGetInfo]
-@="With Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo\shell\10AGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo\shell\10BGetInfo]
-@="Without Hashes"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\10GetInfo\shell\10BGetInfo\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op GetInfo -Path \"%1\" -NoHashes -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\11AApply]
-@="Apply Image"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\11AApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\11BApply]
-@="Install Windows"
-"HasLUAShield"=""
-"AppliesTo"="System.FileName:\"install.swm\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\11BApply\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Apply -Path \"%1\" -InstallingWindows -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join]
-"MUIVerb"="Join SWM..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join\shell\23JoinWIM]
-@="Into WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join\shell\23JoinWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op JoinWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join\shell\24JoinESD]
-@="Into ESD"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_SWM\shell\23Join\shell\24JoinESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op JoinESD -Path \"%1\" -CheckIntegrity"
-
-; ================================================
-; ISO file submenu.
-; ================================================
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-"AppliesTo"="System.FileExtension:\"iso\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract]
-"MUIVerb"="Extract..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\17ExtractWIM]
-@="WIM from ISO"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\17ExtractWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\18ExtractESD]
-@="ESD from ISO"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\18ExtractESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\19ExtractSWM]
-@="SWM from ISO"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_ISO\shell\Extract\shell\19ExtractSWM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractSWM -Path \"%1\" -CheckIntegrity"
-
-; ================================================
-; IMG file submenu.
-; ================================================
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-"AppliesTo"="System.FileExtension:\"img\""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract]
-"MUIVerb"="Extract..."
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\17ExtractWIM]
-@="WIM from IMG"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\17ExtractWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\18ExtractESD]
-@="ESD from IMG"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\18ExtractESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\19ExtractSWM]
-@="SWM from IMG"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\*\shell\ALOSImageTools_IMG\shell\Extract\shell\19ExtractSWM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op ExtractSWM -Path \"%1\" -CheckIntegrity"
-
-; ================================================
-; Directory background operations.
-; ================================================
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\01Capture]
-@="Capture to WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\01Capture\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Capture -Path \"%V\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\02Append]
-@="Append to WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\02Append\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Append -Path \"%V\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\runas]
-@="Cleanup WIM Mounts"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\Background\shell\ALOSImageTools\shell\runas\command]
-@="dism.exe /cleanup-wim"
-
-; ================================================
-; Directory operations.
-; ================================================
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\01Capture]
-@="Capture to WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\01Capture\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Capture -Path \"%V\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\02Append]
-@="Append to WIM"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\02Append\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op Append -Path \"%V\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\runas]
-@="Cleanup WIM Mounts"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Directory\shell\ALOSImageTools\shell\runas\command]
-@="dism.exe /cleanup-wim"
-
-; ================================================
-; Drive operations.
-; ================================================
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools]
-"MUIVerb"="ALOS Image Tools"
-"SubCommands"=""
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell]
-@=""
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\20SaveWIM]
-@="Image Drive To WIM File"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\20SaveWIM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op SaveWIM -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\21SaveESD]
-@="Image Drive To ESD File"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\21SaveESD\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op SaveESD -Path \"%1\" -CheckIntegrity"
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\22SaveSWM]
-@="Image Drive To SWM File"
-"HasLUAShield"=""
-
-[HKEY_CLASSES_ROOT\Drive\shell\ALOSImageTools\shell\22SaveSWM\command]
-@="\"$PSExePath\" -NoProfile -NoLogo -STA -ExecutionPolicy Bypass -File \"$ALOSImageTools\" -Op SaveSWM -Path \"%1\" -CheckIntegrity"
-
-; ==========================================
-; END OF CONTEXT MENU REGISTRY.
-; ==========================================
-"@
             $RegFile = Join-Path $env:TEMP 'ALOS-ImageTools.reg'
             try {
-                if ($CI -eq "Yes") {
-                    Write-Host "OK! Check integrity is on."
-                    $Registry = $Registry_CI
-                } elseif ($CI -eq "No") {
-                    Write-Host "OK! Check integrity is on."
-                    $Registry = $Registry_NoCI
-                } else {
-                    return $false
-                }
                 Set-Content -LiteralPath $RegFile -Value $Registry -Encoding Unicode
                 & reg.exe import $RegFile
                 if ($LASTEXITCODE -gt 0) { Warn "Registry cannot be imported. Please try again."; Clear-Host; return $false }
@@ -3635,7 +3298,8 @@ Windows Registry Editor Version 5.00
 Show-Finished
 <#
     End of program. All credits on ALOS Image Tools goes to Aarav Katariya.
-    Run either setup_wf.exe or setup_wpf.exe in the same folder.
+    Run either setup_wf.exe or setup_wpf.exe in the same folder or just
+    execute this script without any arguments to launch setup.
     Made by Aarav Katariya with love and care...
-    Line count: 3641.
+    Line count: 3305
 #>
