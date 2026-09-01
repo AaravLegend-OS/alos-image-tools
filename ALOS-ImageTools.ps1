@@ -278,6 +278,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml;
+
 namespace ALOSImageTools
 {
     public static class NativeWimg
@@ -286,6 +287,7 @@ namespace ALOSImageTools
         public const uint WIM_GENERIC_WRITE = 0x40000000;
         public const uint WIM_OPEN_EXISTING = 3;
         public const uint WIM_COMPRESS_NONE = 0;
+
         [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
         public struct WIM_INFO
         {
@@ -300,6 +302,7 @@ namespace ALOSImageTools
             public uint WimAttributes;
             public uint WimFlagsAndAttr;
         }
+
         [DllImport("wimgapi.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern IntPtr WIMCreateFile(
             string pszWimPath,
@@ -308,47 +311,71 @@ namespace ALOSImageTools
             uint dwFlagsAndAttributes,
             uint dwCompressionType,
             out uint pdwCreationResult);
+
         [DllImport("wimgapi.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool WIMSetBootImage(
             IntPtr hWim,
             uint dwImageIndex);
+
         [DllImport("wimgapi.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool WIMGetAttributes(
             IntPtr hWim,
             out WIM_INFO pWimInfo,
             uint cbWimInfo);
+
         [DllImport("wimgapi.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool WIMGetImageInformation(
             IntPtr hWim,
             out IntPtr ppvImageInfo,
             out uint pcbImageInfo);
+
         [DllImport("wimgapi.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool WIMSetImageInformation(
             IntPtr hWim,
             IntPtr pvImageInfo,
             uint cbImageInfo);
+
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern IntPtr LocalFree(IntPtr hMem);
+
         [DllImport("wimgapi.dll", SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
         public static extern bool WIMCloseHandle(
             IntPtr hObject);
+
+        /// <summary>
+        /// Retrieves the image information XML from a WIM handle.
+        /// </summary>
         public static string GetImageInformation(IntPtr hWim)
         {
             IntPtr xmlBuffer = IntPtr.Zero;
             uint xmlSize = 0;
+
             if (!WIMGetImageInformation(hWim, out xmlBuffer, out xmlSize))
-                throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+            {
+                int lastError = Marshal.GetLastWin32Error();
+                throw new System.ComponentModel.Win32Exception(lastError,
+                    $"WIMGetImageInformation failed with error {lastError}.");
+            }
+
             try
             {
                 if (xmlBuffer == IntPtr.Zero || xmlSize == 0)
                     throw new InvalidOperationException("WIMGetImageInformation returned an empty XML document.");
-                string xml = Marshal.PtrToStringUni(xmlBuffer, checked((int)(xmlSize / 2)));
-                return xml.TrimEnd('\0');
+
+                // The string is Unicode, but WIMGAPI does NOT include a null terminator in the size.
+                // We must read exactly xmlSize bytes, then trim any trailing nulls.
+                byte[] rawBytes = new byte[xmlSize];
+                Marshal.Copy(xmlBuffer, rawBytes, 0, (int)xmlSize);
+                string xml = Encoding.Unicode.GetString(rawBytes);
+
+                // Trim any trailing null characters (some builds may include them).
+                xml = xml.TrimEnd('\0');
+                return xml;
             }
             finally
             {
@@ -356,22 +383,39 @@ namespace ALOSImageTools
                     LocalFree(xmlBuffer);
             }
         }
+
+        /// <summary>
+        /// Sets the image information XML for a WIM handle.
+        /// </summary>
         public static bool SetImageInformation(IntPtr hWim, string xml)
         {
             if (xml == null)
-                throw new ArgumentNullException("xml");
+                throw new ArgumentNullException(nameof(xml));
+
+            // WIMGAPI expects a Unicode string WITHOUT a null terminator.
             byte[] bytes = Encoding.Unicode.GetBytes(xml);
             IntPtr buffer = Marshal.AllocHGlobal(bytes.Length);
             try
             {
                 Marshal.Copy(bytes, 0, buffer, bytes.Length);
-                return WIMSetImageInformation(hWim, buffer, checked((uint)bytes.Length));
+                bool result = WIMSetImageInformation(hWim, buffer, (uint)bytes.Length);
+                if (!result)
+                {
+                    int lastError = Marshal.GetLastWin32Error();
+                    throw new System.ComponentModel.Win32Exception(lastError,
+                        $"WIMSetImageInformation failed with error {lastError}.");
+                }
+                return result;
             }
             finally
             {
                 Marshal.FreeHGlobal(buffer);
             }
         }
+
+        /// <summary>
+        /// Updates the NAME, DESCRIPTION, and FLAGS of a specific image index.
+        /// </summary>
         public static bool SetImageMetadata(
             IntPtr hWim,
             uint imageIndex,
@@ -381,22 +425,32 @@ namespace ALOSImageTools
             out string error)
         {
             error = null;
+
             try
             {
+                // 1. Get current XML
                 string xml = GetImageInformation(hWim);
-                XmlDocument document = new XmlDocument();
-                document.PreserveWhitespace = true;
-                document.LoadXml(xml);
-                XmlNode image = document.SelectSingleNode("/WIM/IMAGE[INDEX=" + imageIndex.ToString(System.Globalization.CultureInfo.InvariantCulture) + "]");
+
+                // 2. Load into XmlDocument with namespace awareness
+                XmlDocument doc = new XmlDocument();
+                doc.PreserveWhitespace = true;
+                doc.LoadXml(xml);
+
+                // 3. Find the target image by INDEX
+                XmlNode image = doc.SelectSingleNode($"/WIM/IMAGE[INDEX={imageIndex}]");
                 if (image == null)
                 {
-                    error = "Image index " + imageIndex + " was not found in the WIM image-information XML.";
+                    error = $"Image index {imageIndex} was not found in the WIM image-information XML.";
                     return false;
                 }
-                SetElementValue(document, image, "NAME", name);
-                SetElementValue(document, image, "DESCRIPTION", description);
-                SetElementValue(document, image, "FLAGS", flags);
-                return SetImageInformation(hWim, document.OuterXml);
+
+                // 4. Update or create the child elements
+                SetElementValue(doc, image, "NAME", name);
+                SetElementValue(doc, image, "DESCRIPTION", description);
+                SetElementValue(doc, image, "FLAGS", flags);
+
+                // 5. Write back the modified XML
+                return SetImageInformation(hWim, doc.OuterXml);
             }
             catch (Exception ex)
             {
@@ -404,14 +458,18 @@ namespace ALOSImageTools
                 return false;
             }
         }
+
+        /// <summary>
+        /// Helper: sets the inner text of a child element; creates it if missing.
+        /// </summary>
         private static void SetElementValue(
             XmlDocument document,
             XmlNode image,
             string elementName,
             string value)
         {
-            if (value == null)
-                return;
+            if (value == null) return; // Do not modify if value is null (keep as is)
+
             XmlNode node = image.SelectSingleNode(elementName);
             if (node == null)
             {
